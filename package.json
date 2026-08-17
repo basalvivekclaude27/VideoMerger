@@ -1,0 +1,13 @@
+{
+  "name": "mergevideos",
+  "version": "1.0.0",
+  "description": "Local web app to label, merge and compress videos using ffmpeg",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.0.0"
+  }
+}

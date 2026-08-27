@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
+const youtubeAuth = require('./youtube-auth');
 
 const PORT = 1010;
 const ROOT = __dirname;
@@ -22,6 +23,9 @@ app.use(express.static(path.join(ROOT, 'public')));
 // ---- in-memory job tracking ----
 // jobs: jobId -> { percent, status: 'queued'|'processing'|'done'|'error', message, outputPath }
 const jobs = new Map();
+
+// uploadId -> { percent, status: 'queued'|'processing'|'done'|'error', message, videoId, videoUrl }
+const uploads = new Map();
 
 // ---------------------------------------------------------------------
 // Upload
@@ -232,6 +236,40 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 });
 
 // ---------------------------------------------------------------------
+// Native Windows file browse dialog (single video file, e.g. for a
+// standalone YouTube upload of a file that wasn't just produced here)
+// ---------------------------------------------------------------------
+app.get('/api/browse-file', (req, res) => {
+  const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.StartPosition = 'CenterScreen'
+$owner.WindowState = 'Minimized'
+$owner.ShowInTaskbar = $false
+$owner.Show()
+$owner.Activate()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = 'Select a video file to upload'
+$dialog.Filter = 'Video files|*.mp4;*.mov;*.m4v;*.avi;*.mkv;*.webm;*.wmv;*.flv;*.mpg;*.mpeg;*.3gp;*.ts;*.m2ts|All files|*.*'
+$dialog.Multiselect = $false
+$result = $dialog.ShowDialog($owner)
+$owner.Close()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.FileName
+}
+`.trim();
+
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', psScript], { timeout: 120000 }, (err, stdout) => {
+    if (err) {
+      return res.status(500).json({ error: 'Could not open file dialog: ' + err.message });
+    }
+    const selected = stdout.trim();
+    res.json({ path: selected || null });
+  });
+});
+
+// ---------------------------------------------------------------------
 // Generate (merge + label + compress)
 // ---------------------------------------------------------------------
 app.post('/api/generate', (req, res) => {
@@ -286,6 +324,105 @@ app.get('/api/progress/:jobId', (req, res) => {
   if (!job) return res.status(404).json({ error: 'Unknown job' });
   res.json(job);
 });
+
+// ---------------------------------------------------------------------
+// YouTube upload
+// ---------------------------------------------------------------------
+app.get('/api/youtube/auth-status', (req, res) => {
+  res.json(youtubeAuth.getAuthStatus());
+});
+
+app.get('/api/youtube/authorize', async (req, res) => {
+  try {
+    await youtubeAuth.startAuthFlow();
+    res.json({ connected: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const ALLOWED_PRIVACY = new Set(['public', 'unlisted', 'private']);
+
+app.post('/api/youtube/upload', (req, res) => {
+  const { outputPath, title, description, tags, privacyStatus } = req.body;
+
+  if (!outputPath || typeof outputPath !== 'string') {
+    return res.status(400).json({ error: 'outputPath is required' });
+  }
+  let stat;
+  try {
+    stat = fs.statSync(outputPath);
+  } catch {
+    return res.status(400).json({ error: 'File not found: ' + outputPath });
+  }
+  if (!stat.isFile()) {
+    return res.status(400).json({ error: 'Not a file: ' + outputPath });
+  }
+  if (!title || !title.trim()) {
+    return res.status(400).json({ error: 'title is required' });
+  }
+  const privacy = ALLOWED_PRIVACY.has(privacyStatus) ? privacyStatus : 'public';
+
+  const uploadId = crypto.randomBytes(8).toString('hex');
+  uploads.set(uploadId, { percent: 0, status: 'queued', message: 'Queued', videoId: null, videoUrl: null });
+  res.json({ uploadId });
+
+  runYoutubeUpload(uploadId, {
+    outputPath,
+    title: title.trim(),
+    description: description || '',
+    tags: tags || '',
+    privacy,
+    fileSize: stat.size
+  }).catch((err) => {
+    uploads.set(uploadId, { percent: 0, status: 'error', message: err.message, videoId: null, videoUrl: null });
+  });
+});
+
+app.get('/api/youtube/upload-progress/:uploadId', (req, res) => {
+  const u = uploads.get(req.params.uploadId);
+  if (!u) return res.status(404).json({ error: 'Unknown upload' });
+  res.json(u);
+});
+
+async function runYoutubeUpload(uploadId, { outputPath, title, description, tags, privacy, fileSize }) {
+  const setUpload = (patch) => uploads.set(uploadId, { ...uploads.get(uploadId), ...patch });
+  setUpload({ status: 'processing', message: 'Uploading to YouTube...', percent: 1 });
+
+  const auth = await youtubeAuth.getAuthorizedClient();
+
+  const tagList = tags
+    ? tags.split(',').map((t) => t.trim()).filter(Boolean)
+    : undefined;
+
+  // Resumable, byte-verified upload — see youtube-auth.js for why this
+  // replaced a single-shot media upload (that was the source of videos
+  // arriving on YouTube with repeated/missing/desynced sections).
+  const response = await youtubeAuth.uploadVideoResumable(auth, {
+    filePath: outputPath,
+    fileSize,
+    metadata: {
+      snippet: { title, description, tags: tagList },
+      status: { privacyStatus: privacy }
+    },
+    onProgress: (bytesUploaded) => {
+      // Cap display at 99% — YouTube still has to finish processing the
+      // upload server-side after the last byte is sent, and the response
+      // (and our 'done' state) only arrives after that.
+      const percent = fileSize ? Math.min(99, Math.round((bytesUploaded / fileSize) * 100)) : 0;
+      setUpload({ percent, message: `Uploading... ${percent}%` });
+    }
+  });
+
+  const videoId = response.id;
+  setUpload({
+    status: 'done',
+    percent: 100,
+    message: 'Uploaded',
+    videoId,
+    videoUrl: `https://youtu.be/${videoId}`
+  });
+}
 
 // ---------------------------------------------------------------------
 // Pipeline helpers
@@ -412,10 +549,11 @@ async function runPipeline(jobId, clips, destFolder) {
   for (const p of inputPaths) durations.push(await getDuration(p));
   const totalDuration = durations.reduce((a, b) => a + b, 0) || 1;
 
-  // Weighted progress: normalize pass (60% of total time) + concat pass (40%)
+  // Weighted progress: normalize pass + concat pass + final compress pass
   let doneSeconds = 0;
-  const normalizeWeight = 0.6;
-  const concatWeight = 0.4;
+  const normalizeWeight = 0.45;
+  const concatWeight = 0.1;
+  const compressWeight = 0.45;
 
   const segmentPaths = [];
   for (let i = 0; i < clips.length; i++) {
@@ -506,6 +644,17 @@ async function runPipeline(jobId, clips, destFolder) {
       // the test clips.
       '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11,aresample=async=1:first_pts=0',
       '-avoid_negative_ts', 'make_zero',
+      // AAC encodes in fixed 1024-sample frames, so the encoded audio
+      // track always overshoots the (frame-accurate CFR) video track by
+      // a fraction of a frame — and without -shortest it overshoots by
+      // SEVERAL frames' worth of extra tail padding from the loudnorm/
+      // aresample buffering. Concat below is a plain stream-copy append
+      // with no per-boundary resync, so that per-segment overshoot adds
+      // up across every clip — audible drift and, on long merges, video
+      // visibly falling behind its audio. -shortest caps audio to the
+      // video's length, cutting each segment's overshoot down to the
+      // unavoidable <1-frame (~10-20ms) AAC quantization floor.
+      '-shortest',
       '-movflags', '+faststart',
       outPath
     ];
@@ -527,9 +676,10 @@ async function runPipeline(jobId, clips, destFolder) {
     .join('\n');
   fs.writeFileSync(listFile, listContent);
 
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const outputFilename = `merged_output_${timestamp}.mp4`;
-  const finalOutputPath = path.join(destFolder, outputFilename);
+  // Concat first into a TMP file, not straight into destFolder — the
+  // compression pass below re-encodes this into the real output, so this
+  // copy never needs to leave tmp.
+  const concatOutputPath = path.join(jobTmpDir, 'concat_output.mp4');
 
   // Every segment was normalized to identical params above (same fps/
   // resolution/codec, 48kHz stereo audio), so this is the standard
@@ -542,11 +692,65 @@ async function runPipeline(jobId, clips, destFolder) {
     '-i', listFile,
     '-c', 'copy',
     '-movflags', '+faststart',
-    finalOutputPath
+    concatOutputPath
   ], (seconds) => {
     const overall = normalizeWeight + Math.min(seconds / totalDuration, 1) * concatWeight;
     setJob({ percent: Math.round(overall * 100) });
   });
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const outputFilename = `merged_output_${timestamp}.mp4`;
+  const finalOutputPath = path.join(destFolder, outputFilename);
+  const originalSizeBytes = fs.statSync(concatOutputPath).size;
+
+  setJob({ message: 'Compressing final video...', percent: Math.round((normalizeWeight + concatWeight) * 100) });
+
+  let compressed = false;
+  try {
+    // Re-encode H.264 -> H.265/HEVC. HEVC needs roughly half the bitrate of
+    // H.264 for the same perceived quality, so this shrinks the file
+    // substantially at a CRF chosen to stay visually indistinguishable from
+    // the source (not just "smaller"). Audio is stream-copied (already
+    // normalized above) so it isn't touched by a second lossy encode.
+    await runFfmpeg([
+      '-i', concatOutputPath,
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-c:v', 'libx265',
+      '-preset', 'medium',
+      '-crf', '23',
+      '-tag:v', 'hvc1', // so Windows/QuickTime/Movies&TV recognize the HEVC file
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      finalOutputPath
+    ], (seconds) => {
+      const overall = normalizeWeight + concatWeight + Math.min(seconds / totalDuration, 1) * compressWeight;
+      setJob({ percent: Math.round(overall * 100) });
+    });
+    compressed = true;
+  } catch (err) {
+    // No libx265 in this ffmpeg build, or the encode otherwise failed —
+    // fall back to the already-merged file rather than losing the job.
+    fs.copyFileSync(concatOutputPath, finalOutputPath);
+  }
+
+  const compressedSizeBytes = fs.statSync(finalOutputPath).size;
+  const savedBytes = Math.max(0, originalSizeBytes - compressedSizeBytes);
+  const savedPercent = originalSizeBytes > 0 ? Math.round((savedBytes / originalSizeBytes) * 1000) / 10 : 0;
+
+  // When compression ran, finalOutputPath is H.265/HEVC. That's great for
+  // local storage (half the bitrate of H.264 at equal quality) but YouTube's
+  // own ingest/transcode pipeline is documented and tested primarily
+  // against H.264 — HEVC uploads are known to occasionally come out with
+  // repeated/skipped/desynced sections server-side even when the uploaded
+  // bytes are verified correct, which plain H.264 does not exhibit. So keep
+  // a second copy of the pre-compression H.264 file specifically as the
+  // upload-to-YouTube source, alongside the small HEVC file kept for disk.
+  let youtubeSafePath = finalOutputPath;
+  if (compressed) {
+    youtubeSafePath = path.join(destFolder, `merged_output_${timestamp}_youtube-safe.mp4`);
+    fs.copyFileSync(concatOutputPath, youtubeSafePath);
+  }
 
   // cleanup temp files
   try {
@@ -554,7 +758,18 @@ async function runPipeline(jobId, clips, destFolder) {
     fs.rmSync(jobUploadDir, { recursive: true, force: true });
   } catch { /* non-fatal */ }
 
-  setJob({ status: 'done', percent: 100, message: 'Done', outputPath: finalOutputPath });
+  setJob({
+    status: 'done',
+    percent: 100,
+    message: compressed ? 'Done' : 'Done (compression unavailable, saved uncompressed merge)',
+    outputPath: finalOutputPath,
+    youtubeSafePath,
+    originalSizeBytes,
+    compressedSizeBytes,
+    savedBytes,
+    savedPercent,
+    compressed
+  });
 }
 
 // ---------------------------------------------------------------------

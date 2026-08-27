@@ -3,3 +3,5 @@ uploads/
 tmp/
 output/
 *.log
+credentials/*.json
+token.json

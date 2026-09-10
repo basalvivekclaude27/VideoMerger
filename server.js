@@ -209,6 +209,67 @@ app.post('/api/upload-from-path', (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// Bulk version of /api/upload-from-path for the image-slideshow page:
+// copies multiple already-on-disk images (from /api/browse-images) into
+// the job's upload dir in one request. Per-file failures are reported in
+// `errors` rather than failing the whole batch, so one bad path (deleted
+// mid-flight, unsupported extension, etc.) doesn't block the rest.
+// ---------------------------------------------------------------------
+app.post('/api/upload-images-from-path', (req, res) => {
+  const { jobId, fullPaths } = req.body;
+  if (!jobId || !/^[a-zA-Z0-9_-]+$/.test(jobId)) {
+    return res.status(400).json({ error: 'Invalid jobId' });
+  }
+  if (!Array.isArray(fullPaths) || fullPaths.length === 0) {
+    return res.status(400).json({ error: 'fullPaths is required' });
+  }
+
+  const dir = path.join(UPLOAD_DIR, jobId);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const files = [];
+  const errors = [];
+
+  for (const fullPath of fullPaths) {
+    if (typeof fullPath !== 'string' || !fullPath) {
+      errors.push({ path: String(fullPath), error: 'Invalid path' });
+      continue;
+    }
+    const ext = path.extname(fullPath).toLowerCase();
+    if (!ALLOWED_IMAGE_EXT.has(ext)) {
+      errors.push({ path: fullPath, error: `Unsupported file type: ${fullPath}` });
+      continue;
+    }
+    let stat;
+    try {
+      stat = fs.statSync(fullPath);
+    } catch {
+      errors.push({ path: fullPath, error: 'File not found: ' + fullPath });
+      continue;
+    }
+    if (!stat.isFile()) {
+      errors.push({ path: fullPath, error: 'Not a file: ' + fullPath });
+      continue;
+    }
+    if (stat.size > MAX_FILE_SIZE) {
+      errors.push({ path: fullPath, error: 'File too large: ' + fullPath });
+      continue;
+    }
+    const safe = crypto.randomBytes(6).toString('hex') + ext;
+    const dest = path.join(dir, safe);
+    try {
+      fs.copyFileSync(fullPath, dest);
+    } catch (err) {
+      errors.push({ path: fullPath, error: 'Could not copy file: ' + err.message });
+      continue;
+    }
+    files.push({ filename: safe, originalName: path.basename(fullPath) });
+  }
+
+  res.json({ files, errors });
+});
+
+// ---------------------------------------------------------------------
 // Native Windows folder browse dialog
 // ---------------------------------------------------------------------
 app.get('/api/browse-folder', (req, res) => {

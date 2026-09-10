@@ -2,6 +2,7 @@
   const clipsContainer = document.getElementById('clipsContainer');
   const addClipBtn = document.getElementById('addClipBtn');
   const loadFolderBtn = document.getElementById('loadFolderBtn');
+  const addImagesBtn = document.getElementById('addImagesBtn');
   const browseBtn = document.getElementById('browseBtn');
   const destFolderInput = document.getElementById('destFolder');
   const generateBtn = document.getElementById('generateBtn');
@@ -330,6 +331,9 @@
   }
 
   addClipBtn.addEventListener('click', () => addClipRow());
+
+  // TODO: image support not implemented yet.
+  addImagesBtn.addEventListener('click', () => {});
 
   loadFolderBtn.addEventListener('click', async () => {
     clearAlert();

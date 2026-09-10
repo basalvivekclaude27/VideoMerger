@@ -1377,20 +1377,31 @@ function buildNotebookHtml(pages) {
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
-    min-height: 100vh;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 32px 16px 100px;
+    padding: 32px 16px 96px;
     background: radial-gradient(circle at top, #f6efe2, #e7dcc6);
     font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   .page {
     display: none;
-    width: min(900px, 92vw);
+    /* Fit inside the viewport on BOTH axes, not just width: the width is
+       whichever is smaller of 92% of viewport width, or the width a 4:3
+       box would have if its height were capped to the space left after
+       the body's top/bottom padding (32px + 96px, for the title/nav) —
+       so the resulting height (width * 3/4) never exceeds that budget
+       either. This is what actually fixes the old bug (a fixed-width
+       page whose height, from aspect-ratio alone, could exceed a short
+       viewport and force a scrollbar) — sizing by width only ever
+       constrains one axis. */
+    width: min(92vw, calc((100vh - 128px) * 4 / 3));
+    max-height: calc(100vh - 128px);
     aspect-ratio: 4 / 3;
     background: #fffdf9;
     border-radius: 14px;
@@ -1452,8 +1463,10 @@ ${pageDivs}
   </div>
 <script>
 (function () {
+  var AUTO_ADVANCE_MS = 4000;
   var pages = document.querySelectorAll('.page');
   var idx = 0;
+  var autoTimer = null;
   var counter = document.getElementById('pageCounter');
   var prevBtn = document.getElementById('prevBtn');
   var nextBtn = document.getElementById('nextBtn');
@@ -1463,6 +1476,12 @@ ${pageDivs}
     counter.textContent = 'Page ' + (i + 1) + ' of ' + pages.length;
     prevBtn.disabled = i === 0;
     nextBtn.disabled = i === pages.length - 1;
+    // Every page change — manual click, arrow key, or a previous auto-
+    // advance — restarts the 4s countdown, so the album only advances on
+    // its own once 4s pass with no interaction. Wraps back to page 0
+    // after the last page so an unattended album keeps cycling.
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(function () { show((idx + 1) % pages.length); }, AUTO_ADVANCE_MS);
   }
   prevBtn.addEventListener('click', function () { if (idx > 0) show(idx - 1); });
   nextBtn.addEventListener('click', function () { if (idx < pages.length - 1) show(idx + 1); });

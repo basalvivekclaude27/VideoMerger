@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MergeVideos — Image Slideshow</title>
+<link href="vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+<link href="styles.css" rel="stylesheet">
+</head>
+<body>
+
+<div class="app-header text-center">
+  <h1 class="h3 mb-1">🖼️ Image Slideshow</h1>
+  <p class="mb-0 opacity-75">Turn a stack of images into one compressed video</p>
+</div>
+
+<div class="container" style="max-width: 860px;">
+
+  <a href="index.html" class="d-inline-block mb-3">&larr; Back to merge videos</a>
+
+  <div id="imagesContainer"></div>
+
+  <div class="d-flex gap-2 mb-4">
+    <button id="browseImagesBtn" type="button" class="btn btn-outline-primary">
+      🖼️ Browse Images...
+    </button>
+  </div>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <label class="form-label fw-semibold">Destination Folder</label>
+      <div class="input-group">
+        <input type="text" id="destFolder" class="form-control" placeholder="Choose where to save the slideshow video..." readonly>
+        <button id="browseBtn" class="btn btn-outline-secondary" type="button">Browse...</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-grid mb-4">
+    <button id="generateBtn" class="btn btn-primary btn-lg" type="button" disabled>Generate Video</button>
+  </div>
+
+  <div id="progressWrap" class="card shadow-sm mb-4">
+    <div class="card-body">
+      <div class="d-flex justify-content-between mb-1">
+        <span id="progressStatus" class="fw-semibold">Processing...</span>
+        <span id="progressPercent">0%</span>
+      </div>
+      <div class="progress" role="progressbar">
+        <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="alertArea"></div>
+
+  <div id="youtubeCard" class="card shadow-sm mb-4">
+    <div class="card-body">
+      <h5 class="card-title">📺 Upload to YouTube</h5>
+
+      <div class="mb-2">
+        <label class="form-label small mb-1">Video file</label>
+        <div class="input-group">
+          <input type="text" id="ytVideoPath" class="form-control" placeholder="Choose a video file to upload..." readonly>
+          <button id="ytBrowseBtn" class="btn btn-outline-secondary" type="button">Browse...</button>
+        </div>
+      </div>
+
+      <div id="ytConnectWrap">
+        <button id="ytConnectBtn" type="button" class="btn btn-outline-danger">Connect YouTube Account</button>
+      </div>
+
+      <div id="ytFormWrap" style="display:none">
+        <div class="mb-2">
+          <label class="form-label small mb-1">Title</label>
+          <input type="text" id="ytTitle" class="form-control" placeholder="Video title">
+        </div>
+        <div class="mb-2">
+          <label class="form-label small mb-1">Description</label>
+          <textarea id="ytDescription" class="form-control" rows="2" placeholder="(optional)"></textarea>
+        </div>
+        <div class="mb-2">
+          <label class="form-label small mb-1">Tags (comma-separated)</label>
+          <input type="text" id="ytTags" class="form-control" placeholder="(optional)">
+        </div>
+        <div class="mb-3">
+          <label class="form-label small mb-1">Privacy</label>
+          <select id="ytPrivacy" class="form-select">
+            <option value="public" selected>Public</option>
+            <option value="unlisted">Unlisted</option>
+            <option value="private">Private</option>
+          </select>
+        </div>
+        <button id="ytUploadBtn" type="button" class="btn btn-danger">Upload to YouTube</button>
+
+        <div id="ytProgressWrap" class="mt-3" style="display:none">
+          <div class="d-flex justify-content-between mb-1">
+            <span id="ytProgressStatus" class="fw-semibold">Uploading...</span>
+            <span id="ytProgressPercent">0%</span>
+          </div>
+          <div class="progress" role="progressbar">
+            <div id="ytProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="ytAlertArea" class="mt-3"></div>
+    </div>
+  </div>
+
+</div>
+
+<footer>Runs locally on your machine · port 1010</footer>
+
+<script src="vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script src="youtube-upload.js"></script>
+<script src="images.js"></script>
+</body>
+</html>

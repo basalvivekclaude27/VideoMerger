@@ -19,6 +19,10 @@ for (const dir of [UPLOAD_DIR, TMP_DIR]) {
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(ROOT, 'public')));
+// Read-only static serving so <img> thumbnails on the image-slideshow page
+// can load copied-in images by URL. This app is already localhost-only
+// with no auth, so this doesn't change its threat model.
+app.use('/uploads', express.static(UPLOAD_DIR));
 
 // ---- in-memory job tracking ----
 // jobs: jobId -> { percent, status: 'queued'|'processing'|'done'|'error', message, outputPath }
@@ -53,6 +57,10 @@ const storage = multer.diskStorage({
 const ALLOWED_VIDEO_EXT = new Set([
   '.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm',
   '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ts', '.m2ts'
+]);
+
+const ALLOWED_IMAGE_EXT = new Set([
+  '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp'
 ]);
 
 function fileFilter(req, file, cb) {
@@ -266,6 +274,40 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     }
     const selected = stdout.trim();
     res.json({ path: selected || null });
+  });
+});
+
+// ---------------------------------------------------------------------
+// Native Windows file browse dialog (multi-select images, for the
+// image-slideshow page)
+// ---------------------------------------------------------------------
+app.get('/api/browse-images', (req, res) => {
+  const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.StartPosition = 'CenterScreen'
+$owner.WindowState = 'Minimized'
+$owner.ShowInTaskbar = $false
+$owner.Show()
+$owner.Activate()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = 'Select images for the slideshow'
+$dialog.Filter = 'Image files|*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.tiff;*.webp|All files|*.*'
+$dialog.Multiselect = $true
+$result = $dialog.ShowDialog($owner)
+$owner.Close()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  $dialog.FileNames | ForEach-Object { Write-Output $_ }
+}
+`.trim();
+
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', psScript], { timeout: 120000 }, (err, stdout) => {
+    if (err) {
+      return res.status(500).json({ error: 'Could not open file dialog: ' + err.message });
+    }
+    const paths = stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    res.json({ paths });
   });
 });
 

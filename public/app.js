@@ -183,8 +183,9 @@ function showAlert(message, type = 'danger') {
 
   addClipBtn.addEventListener('click', () => addClipRow());
 
-  // TODO: image support not implemented yet.
-  addImagesBtn.addEventListener('click', () => {});
+  addImagesBtn.addEventListener('click', () => {
+    window.location.href = 'images.html';
+  });
 
   loadFolderBtn.addEventListener('click', async () => {
     clearAlert();

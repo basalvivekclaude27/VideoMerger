@@ -67,6 +67,11 @@ const IMAGE_DURATION = 3; // seconds per image, fixed (see spec)
 const CROSSFADE_DURATION = 0.8; // seconds, must be < IMAGE_DURATION
 const IMAGE_FPS = 30;
 
+// Curated, visually distinct ffmpeg xfade transition styles. Cycled (not
+// randomized) across consecutive transitions so a run is reproducible and
+// varied rather than every pair using the same 'fade'.
+const XFADE_TRANSITIONS = ['fade', 'dissolve', 'wipeleft', 'circleopen', 'slideup', 'zoomin'];
+
 // Builds an ffmpeg filter_complex chaining `xfade` across n pre-built,
 // equal-duration (IMAGE_DURATION) segment inputs [0:v]..[n-1:v] into a
 // single [vout] crossfaded stream. Every segment has the same fixed
@@ -80,10 +85,36 @@ function buildXfadeFilterComplex(n) {
   for (let i = 1; i < n; i++) {
     const outLabel = i === n - 1 ? 'vout' : `v${i}`;
     const offset = i * (IMAGE_DURATION - CROSSFADE_DURATION);
-    parts.push(`[${prevLabel}][${i}:v]xfade=transition=fade:duration=${CROSSFADE_DURATION}:offset=${offset}[${outLabel}]`);
+    const transition = XFADE_TRANSITIONS[(i - 1) % XFADE_TRANSITIONS.length];
+    parts.push(`[${prevLabel}][${i}:v]xfade=transition=${transition}:duration=${CROSSFADE_DURATION}:offset=${offset}[${outLabel}]`);
     prevLabel = outLabel;
   }
   return parts.join(';');
+}
+
+// Synthesizes a slow, calm background pad — three sine tones forming a
+// triad (root/third/fifth), mixed and given a gentle tremolo swell plus a
+// fade in/out — matched exactly to `durationSeconds`. No external audio
+// file or licensing concern: this is generated, not a real recorded track.
+// Fade length shrinks for very short slideshows so in/out fades never
+// overlap (a single 3s image would otherwise ask for 2s in + 2s out on a
+// 3s clip).
+function buildMusicArgs(durationSeconds, outPath) {
+  const fadeDur = Math.min(2, durationSeconds / 4);
+  const fadeOutStart = Math.max(0, durationSeconds - fadeDur);
+  return [
+    '-f', 'lavfi', '-i', `sine=frequency=130.81:duration=${durationSeconds}`,
+    '-f', 'lavfi', '-i', `sine=frequency=164.81:duration=${durationSeconds}`,
+    '-f', 'lavfi', '-i', `sine=frequency=196.00:duration=${durationSeconds}`,
+    '-filter_complex',
+    `[0:a][1:a][2:a]amix=inputs=3:duration=longest,tremolo=f=0.15:d=0.4,volume=0.35,` +
+      `afade=t=in:d=${fadeDur},afade=t=out:st=${fadeOutStart}:d=${fadeDur}`,
+    '-ar', '44100',
+    '-ac', '2',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    outPath
+  ];
 }
 
 function fileFilter(req, file, cb) {
@@ -1092,20 +1123,36 @@ async function runImagePipeline(jobId, images, destFolder) {
   const finalOutputPath = path.join(destFolder, outputFilename);
   const originalSizeBytes = fs.statSync(concatOutputPath).size;
 
-  setJob({ message: 'Compressing final video...', percent: Math.round((normalizeWeight + concatWeight) * 100) });
+  // Generated background music (no external file / licensing concern —
+  // see buildMusicArgs), matched exactly to the video's final duration.
+  // concat_output.mp4 has no audio track at all (images carry none, -an
+  // throughout the segment/xfade passes), so every downstream copy of it
+  // below needs this muxed in via ffmpeg rather than a plain file copy.
+  setJob({ message: 'Composing background music...', percent: Math.round((normalizeWeight + concatWeight) * 100) });
+  const musicPath = path.join(jobTmpDir, 'music.m4a');
+  await runFfmpeg(buildMusicArgs(finalSegDuration, musicPath));
+
+  setJob({ message: 'Compressing final video...' });
 
   // Same compression approach as the video-merge pipeline: H.265/CRF 23
   // for roughly half the bitrate at visually-unchanged quality, falling
-  // back to a plain copy if this ffmpeg build has no libx265.
+  // back to a plain (video-copy + audio-encode) mux if this ffmpeg build
+  // has no libx265 — never a bare file copy, since concat_output.mp4 has
+  // no audio and the music still needs to be muxed in either way.
   let compressed = false;
   try {
     await runFfmpeg([
       '-i', concatOutputPath,
+      '-i', musicPath,
       '-map', '0:v:0',
+      '-map', '1:a:0',
       '-c:v', 'libx265',
       '-preset', 'medium',
       '-crf', '23',
       '-tag:v', 'hvc1',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-shortest',
       '-movflags', '+faststart',
       finalOutputPath
     ], (seconds) => {
@@ -1114,7 +1161,18 @@ async function runImagePipeline(jobId, images, destFolder) {
     });
     compressed = true;
   } catch (err) {
-    fs.copyFileSync(concatOutputPath, finalOutputPath);
+    await runFfmpeg([
+      '-i', concatOutputPath,
+      '-i', musicPath,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-shortest',
+      '-movflags', '+faststart',
+      finalOutputPath
+    ]);
   }
 
   const compressedSizeBytes = fs.statSync(finalOutputPath).size;
@@ -1123,10 +1181,23 @@ async function runImagePipeline(jobId, images, destFolder) {
 
   // Same H.264 "youtube-safe" copy as the video-merge pipeline, and for
   // the same reason: YouTube's ingest pipeline is unreliable with HEVC.
+  // Video is stream-copied (already H.264 from the segment/xfade passes);
+  // audio still has to be encoded since concat_output.mp4 carries none.
   let youtubeSafePath = finalOutputPath;
   if (compressed) {
     youtubeSafePath = path.join(destFolder, `slideshow_output_${timestamp}_youtube-safe.mp4`);
-    fs.copyFileSync(concatOutputPath, youtubeSafePath);
+    await runFfmpeg([
+      '-i', concatOutputPath,
+      '-i', musicPath,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-shortest',
+      '-movflags', '+faststart',
+      youtubeSafePath
+    ]);
   }
 
   try {

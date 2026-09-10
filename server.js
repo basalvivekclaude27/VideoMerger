@@ -1407,6 +1407,11 @@ function buildNotebookHtml(pages) {
     border-radius: 14px;
     box-shadow: 0 24px 60px rgba(40,30,10,.28), 0 2px 8px rgba(40,30,10,.12);
     padding: 28px;
+    /* Defense-in-depth: nothing inside the card should ever be able to
+       visually spill past its rounded edge, no matter what layout quirk
+       causes a child to grow past its intended box (see the grid-item
+       min-size note below for the specific quirk that was doing this). */
+    overflow: hidden;
   }
   .page.active { display: flex; flex-direction: column; }
   .page.title { align-items: center; justify-content: center; text-align: center; }
@@ -1417,13 +1422,29 @@ function buildNotebookHtml(pages) {
     color: #3b3126;
   }
   .page.title p { color: #8a7c68; font-size: 1rem; margin: 0; }
-  .collage { flex: 1; display: grid; gap: 12px; min-height: 0; }
+  .collage { flex: 1; display: grid; gap: 12px; min-height: 0; overflow: hidden; }
   /* object-fit: contain (not cover) so the full photo is always visible —
      cover would crop whichever edges don't match the cell's aspect ratio,
      cutting off part of the actual picture. The mat color behind shows
      through the letterboxing contain can leave, reading as an intentional
-     matted photo rather than an empty gap. */
-  .collage img { width: 100%; height: 100%; object-fit: contain; background: #f1e9da; border-radius: 8px; display: block; }
+     matted photo rather than an empty gap.
+     min-width/min-height: 0 is the actual fix for images escaping their
+     cell: a CSS Grid item's default min-size is "auto", which for a
+     replaced element (an <img>) resolves toward its OWN intrinsic aspect
+     ratio — letting an image push its grid track wider/taller than the
+     1fr sizing intended, regardless of the width/height:100% below.
+     Without this, some images grew past their cell (and, since nothing
+     clipped them, past the card's edge). */
+  .collage img {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    object-fit: contain;
+    background: #f1e9da;
+    border-radius: 8px;
+    display: block;
+  }
   .collage.tpl-hero { grid-template-columns: 1fr; grid-template-rows: 1fr; }
   .collage.tpl-two { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
   .collage.tpl-three { grid-template-columns: 1.4fr 1fr; grid-template-rows: 1fr 1fr; }
@@ -1463,6 +1484,7 @@ function buildNotebookHtml(pages) {
 ${pageDivs}
   <div class="nav">
     <button id="prevBtn" type="button">◀ Previous</button>
+    <button id="pauseBtn" type="button">⏸ Pause</button>
     <span id="pageCounter"></span>
     <button id="nextBtn" type="button">Next ▶</button>
   </div>
@@ -1472,9 +1494,16 @@ ${pageDivs}
   var pages = document.querySelectorAll('.page');
   var idx = 0;
   var autoTimer = null;
+  var paused = false;
   var counter = document.getElementById('pageCounter');
   var prevBtn = document.getElementById('prevBtn');
   var nextBtn = document.getElementById('nextBtn');
+  var pauseBtn = document.getElementById('pauseBtn');
+  function scheduleAuto() {
+    clearTimeout(autoTimer);
+    if (paused) return;
+    autoTimer = setTimeout(function () { show((idx + 1) % pages.length); }, AUTO_ADVANCE_MS);
+  }
   function show(i) {
     pages.forEach(function (p, j) { p.classList.toggle('active', j === i); });
     idx = i;
@@ -1485,11 +1514,15 @@ ${pageDivs}
     // advance — restarts the 4s countdown, so the album only advances on
     // its own once 4s pass with no interaction. Wraps back to page 0
     // after the last page so an unattended album keeps cycling.
-    clearTimeout(autoTimer);
-    autoTimer = setTimeout(function () { show((idx + 1) % pages.length); }, AUTO_ADVANCE_MS);
+    scheduleAuto();
   }
   prevBtn.addEventListener('click', function () { if (idx > 0) show(idx - 1); });
   nextBtn.addEventListener('click', function () { if (idx < pages.length - 1) show(idx + 1); });
+  pauseBtn.addEventListener('click', function () {
+    paused = !paused;
+    pauseBtn.textContent = paused ? '▶ Play' : '⏸ Pause';
+    scheduleAuto(); // pausing clears the pending advance; resuming restarts the 4s countdown from now
+  });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'ArrowLeft' && idx > 0) show(idx - 1);
     if (e.key === 'ArrowRight' && idx < pages.length - 1) show(idx + 1);

@@ -3,6 +3,7 @@
   const addClipBtn = document.getElementById('addClipBtn');
   const loadFolderBtn = document.getElementById('loadFolderBtn');
   const addImagesBtn = document.getElementById('addImagesBtn');
+  const addNotebookBtn = document.getElementById('addNotebookBtn');
   const browseBtn = document.getElementById('browseBtn');
   const destFolderInput = document.getElementById('destFolder');
   const generateBtn = document.getElementById('generateBtn');
@@ -186,6 +187,9 @@
   addImagesBtn.addEventListener('click', () => {
     window.location.href = 'images.html';
   });
+
+  // TODO: notebook feature not implemented yet.
+  addNotebookBtn.addEventListener('click', () => {});
 
   loadFolderBtn.addEventListener('click', async () => {
     clearAlert();

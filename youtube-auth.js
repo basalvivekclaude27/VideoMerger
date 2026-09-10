@@ -33,11 +33,27 @@ function buildOAuth2Client(redirectUri) {
   return new google.auth.OAuth2(creds.client_id, creds.client_secret, redirectUri);
 }
 
-function getAuthStatus() {
+async function getAuthStatus() {
   if (!fs.existsSync(TOKEN_PATH)) return { connected: false };
+  let token;
   try {
-    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
-    return { connected: !!token.refresh_token };
+    token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
+  } catch {
+    return { connected: false };
+  }
+  if (!token.refresh_token) return { connected: false };
+  // A refresh_token field being present isn't enough on its own — an
+  // OAuth consent screen still in "Testing" publishing status issues
+  // refresh tokens that silently expire in ~7 days (Google's token
+  // endpoint then rejects any refresh attempt with invalid_grant). Rather
+  // than trust the field's mere presence, actually attempt a refresh so a
+  // dead token surfaces as "not connected" (showing the Connect button
+  // again) instead of a live-looking upload form that fails at upload
+  // time with a raw OAuth error.
+  try {
+    const oAuth2Client = await getAuthorizedClient();
+    await getFreshAccessToken(oAuth2Client);
+    return { connected: true };
   } catch {
     return { connected: false };
   }

@@ -610,8 +610,8 @@ app.post('/api/generate-images', (req, res) => {
 // ---------------------------------------------------------------------
 // YouTube upload
 // ---------------------------------------------------------------------
-app.get('/api/youtube/auth-status', (req, res) => {
-  res.json(youtubeAuth.getAuthStatus());
+app.get('/api/youtube/auth-status', async (req, res) => {
+  res.json(await youtubeAuth.getAuthStatus());
 });
 
 app.get('/api/youtube/authorize', async (req, res) => {

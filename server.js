@@ -260,22 +260,22 @@ app.post('/api/upload-images-from-path', (req, res) => {
     }
     const ext = path.extname(fullPath).toLowerCase();
     if (!ALLOWED_IMAGE_EXT.has(ext)) {
-      errors.push({ path: fullPath, error: `Unsupported file type: ${fullPath}` });
+      errors.push({ path: fullPath, error: 'Unsupported file type' });
       continue;
     }
     let stat;
     try {
       stat = fs.statSync(fullPath);
     } catch {
-      errors.push({ path: fullPath, error: 'File not found: ' + fullPath });
+      errors.push({ path: fullPath, error: 'File not found' });
       continue;
     }
     if (!stat.isFile()) {
-      errors.push({ path: fullPath, error: 'Not a file: ' + fullPath });
+      errors.push({ path: fullPath, error: 'Not a file' });
       continue;
     }
     if (stat.size > MAX_FILE_SIZE) {
-      errors.push({ path: fullPath, error: 'File too large: ' + fullPath });
+      errors.push({ path: fullPath, error: 'File too large' });
       continue;
     }
     const safe = crypto.randomBytes(6).toString('hex') + ext;
@@ -956,14 +956,31 @@ async function runImagePipeline(jobId, images, destFolder) {
 
   const inputPaths = images.map((img) => path.join(jobUploadDir, img.filename));
 
-  // Target canvas = the largest width/height across all images, same
-  // reasoning as the video-merge pipeline: whichever image happens to be
-  // smallest shouldn't force every other image to be downscaled.
+  // Target canvas: derived from a SINGLE image's own aspect ratio, not
+  // independent max-width/max-height. Unlike the video-merge pipeline
+  // (which pads mismatched aspect ratios with black bars), this pipeline
+  // CROPS to fill the canvas — independent maxes would produce a
+  // near-square canvas out of a portrait+landscape mix, upscaling and
+  // center-cropping away 25-40% of every non-matching-orientation image.
+  // The largest-area image sets the aspect ratio, and its long edge is
+  // clamped to MAX_LONG_EDGE so real photo-sized sources (e.g. 4032x3024
+  // phone photos) don't force three full-resolution encode passes with
+  // very long encode times and output many players can't hardware-decode.
   const probes = [];
   for (const p of inputPaths) probes.push(await ffprobe(p));
+  const largest = probes.reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+  const MAX_LONG_EDGE = 1920;
+  let baseWidth = largest.width;
+  let baseHeight = largest.height;
+  const longEdge = Math.max(baseWidth, baseHeight);
+  if (longEdge > MAX_LONG_EDGE) {
+    const scale = MAX_LONG_EDGE / longEdge;
+    baseWidth = Math.round(baseWidth * scale);
+    baseHeight = Math.round(baseHeight * scale);
+  }
   const target = {
-    width: roundUpEven(Math.max(...probes.map((p) => p.width))),
-    height: roundUpEven(Math.max(...probes.map((p) => p.height)))
+    width: roundUpEven(baseWidth),
+    height: roundUpEven(baseHeight)
   };
 
   const n = inputPaths.length;
@@ -998,9 +1015,20 @@ async function runImagePipeline(jobId, images, destFolder) {
     // non-looped frame (`-i inPath` alone) means zoompan sees exactly 1
     // input frame, so d alone determines the output frame count/duration.
     const vf = [
+      // Force only the first decoded frame through. ALLOWED_IMAGE_EXT
+      // includes animated GIF/WebP, which decode as N frames — without
+      // this, zoompan (which emits `d` output frames PER INPUT FRAME)
+      // would multiply out to N*d frames instead of d, re-triggering the
+      // frame-count blowup the single-input-frame invariant above exists
+      // to prevent, and wrecking the xfade-offset assumption of exactly
+      // IMAGE_DURATION-second segments.
+      `select='eq(n\\,0)'`,
       `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
       `crop=${target.width}:${target.height}`,
-      `zoompan=z='min(zoom+0.0015,1.12)':d=${IMAGE_DURATION * IMAGE_FPS}:s=${target.width}x${target.height}:fps=${IMAGE_FPS}`,
+      // x/y center the Ken Burns zoom on the image instead of defaulting
+      // to x=0:y=0 (top-left), which would make the visible window drift
+      // toward the bottom-right as zoom ramps up.
+      `zoompan=z='min(zoom+0.0015,1.12)':d=${IMAGE_DURATION * IMAGE_FPS}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${target.width}x${target.height}:fps=${IMAGE_FPS}`,
       'format=yuv420p'
     ].join(',');
 

@@ -19,7 +19,7 @@
   let clipCounter = 0;
   const clips = new Map(); // clipUid -> { labelEl, fileEl, filename, thumbEl, cardEl }
 
-function showAlert(message, type = 'danger') {
+  function showAlert(message, type = 'danger') {
     alertArea.innerHTML = `
       <div class="alert alert-${type} alert-dismissible fade show" role="alert">
         ${message}

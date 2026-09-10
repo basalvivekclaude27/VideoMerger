@@ -1418,7 +1418,12 @@ function buildNotebookHtml(pages) {
   }
   .page.title p { color: #8a7c68; font-size: 1rem; margin: 0; }
   .collage { flex: 1; display: grid; gap: 12px; min-height: 0; }
-  .collage img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; display: block; }
+  /* object-fit: contain (not cover) so the full photo is always visible —
+     cover would crop whichever edges don't match the cell's aspect ratio,
+     cutting off part of the actual picture. The mat color behind shows
+     through the letterboxing contain can leave, reading as an intentional
+     matted photo rather than an empty gap. */
+  .collage img { width: 100%; height: 100%; object-fit: contain; background: #f1e9da; border-radius: 8px; display: block; }
   .collage.tpl-hero { grid-template-columns: 1fr; grid-template-rows: 1fr; }
   .collage.tpl-two { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
   .collage.tpl-three { grid-template-columns: 1.4fr 1fr; grid-template-rows: 1fr 1fr; }

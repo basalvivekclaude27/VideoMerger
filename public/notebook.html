@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MergeVideos — Notebook</title>
+<link href="vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+<link href="styles.css" rel="stylesheet">
+</head>
+<body>
+
+<div class="app-header text-center">
+  <h1 class="h3 mb-1">📓 Notebook</h1>
+  <p class="mb-0 opacity-75">Turn a stack of photos into a browsable album</p>
+</div>
+
+<div class="container" style="max-width: 860px;">
+
+  <a href="index.html" class="d-inline-block mb-3">&larr; Back to merge videos</a>
+
+  <div id="imagesContainer"></div>
+
+  <div class="d-flex gap-2 mb-4">
+    <button id="browseImagesBtn" type="button" class="btn btn-outline-primary">
+      🖼️ Browse Images...
+    </button>
+  </div>
+
+  <div class="card shadow-sm mb-4">
+    <div class="card-body">
+      <label class="form-label fw-semibold">Destination Folder</label>
+      <div class="input-group">
+        <input type="text" id="destFolder" class="form-control" placeholder="Choose where to save the notebook..." readonly>
+        <button id="browseBtn" class="btn btn-outline-secondary" type="button">Browse...</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-grid mb-4">
+    <button id="generateBtn" class="btn btn-primary btn-lg" type="button" disabled>Generate Notebook</button>
+  </div>
+
+  <div id="alertArea"></div>
+
+</div>
+
+<footer>Runs locally on your machine · port 1010</footer>
+
+<script src="vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+<script src="notebook.js"></script>
+</body>
+</html>

@@ -188,8 +188,9 @@
     window.location.href = 'images.html';
   });
 
-  // TODO: notebook feature not implemented yet.
-  addNotebookBtn.addEventListener('click', () => {});
+  addNotebookBtn.addEventListener('click', () => {
+    window.location.href = 'notebook.html';
+  });
 
   loadFolderBtn.addEventListener('click', async () => {
     clearAlert();

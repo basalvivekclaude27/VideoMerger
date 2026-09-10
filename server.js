@@ -1312,6 +1312,230 @@ async function runImagePipeline(jobId, images, destFolder, musicSourcePath) {
 }
 
 // ---------------------------------------------------------------------
+// Notebook (photo album): a self-contained HTML file, no video/ffmpeg
+// pipeline involved beyond a quick per-image downscale. Generation is
+// fast (no real-time encode), so unlike the merge/slideshow pipelines
+// this runs synchronously in the request handler — no job queue/polling.
+// ---------------------------------------------------------------------
+const NOTEBOOK_MAX_EDGE = 1600; // longest edge, px — keeps the self-contained HTML file a reasonable size
+
+// scale='min(1600,iw)':... only ever shrinks: when the source is already
+// smaller than NOTEBOOK_MAX_EDGE, min(edge, iw) resolves to iw itself, so
+// force_original_aspect_ratio=decrease has nothing to shrink and the
+// image passes through at its original size (never upscaled).
+function buildNotebookImageArgs(inPath, outPath) {
+  return [
+    '-i', inPath,
+    '-vf', `scale='min(${NOTEBOOK_MAX_EDGE},iw)':'min(${NOTEBOOK_MAX_EDGE},ih)':force_original_aspect_ratio=decrease`,
+    '-q:v', '4',
+    outPath
+  ];
+}
+
+// Curated collage templates (image count each) cycled across pages for
+// visual variety. The last page falls back to the template that exactly
+// matches however many images remain, rather than padding/cropping.
+const NOTEBOOK_TEMPLATES = { hero: 1, two: 2, three: 3, four: 4 };
+const NOTEBOOK_CYCLE = ['hero', 'two', 'four', 'three'];
+
+function planNotebookPages(dataUris) {
+  const pages = [];
+  let i = 0;
+  let cyclePos = 0;
+  while (i < dataUris.length) {
+    const remaining = dataUris.length - i;
+    let templateName = NOTEBOOK_CYCLE[cyclePos % NOTEBOOK_CYCLE.length];
+    let count = NOTEBOOK_TEMPLATES[templateName];
+    if (count > remaining) {
+      templateName = remaining === 1 ? 'hero' : remaining === 2 ? 'two' : 'three';
+      count = NOTEBOOK_TEMPLATES[templateName];
+    }
+    pages.push({ template: templateName, images: dataUris.slice(i, i + count) });
+    i += count;
+    cyclePos++;
+  }
+  return pages;
+}
+
+function buildNotebookHtml(pages) {
+  const pageDivs = pages.map((page) => {
+    const imgs = page.images.map((src) => `<img src="${src}" alt="">`).join('\n          ');
+    return `
+      <section class="page">
+        <div class="collage tpl-${page.template}">
+          ${imgs}
+        </div>
+      </section>`;
+  }).join('\n');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Album</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px 100px;
+    background: radial-gradient(circle at top, #f6efe2, #e7dcc6);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .page {
+    display: none;
+    width: min(900px, 92vw);
+    aspect-ratio: 4 / 3;
+    background: #fffdf9;
+    border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(40,30,10,.28), 0 2px 8px rgba(40,30,10,.12);
+    padding: 28px;
+  }
+  .page.active { display: flex; flex-direction: column; }
+  .page.title { align-items: center; justify-content: center; text-align: center; }
+  .page.title h1 {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 2.4rem;
+    margin: 0 0 .5rem;
+    color: #3b3126;
+  }
+  .page.title p { color: #8a7c68; font-size: 1rem; margin: 0; }
+  .collage { flex: 1; display: grid; gap: 12px; min-height: 0; }
+  .collage img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; display: block; }
+  .collage.tpl-hero { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  .collage.tpl-two { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+  .collage.tpl-three { grid-template-columns: 1.4fr 1fr; grid-template-rows: 1fr 1fr; }
+  .collage.tpl-three img:first-child { grid-row: 1 / span 2; }
+  .collage.tpl-four { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .nav {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: rgba(255,253,249,.92);
+    padding: 10px 20px;
+    border-radius: 999px;
+    box-shadow: 0 8px 24px rgba(40,30,10,.2);
+  }
+  .nav button {
+    border: none;
+    background: #3b3126;
+    color: #fffdf9;
+    padding: 8px 18px;
+    border-radius: 999px;
+    font-size: .95rem;
+    cursor: pointer;
+  }
+  .nav button:disabled { opacity: .35; cursor: default; }
+  .nav span { color: #6b5d4a; font-size: .9rem; min-width: 90px; text-align: center; }
+</style>
+</head>
+<body>
+  <section class="page title">
+    <h1>📓 Photo Album</h1>
+    <p>${pages.length} page${pages.length === 1 ? '' : 's'}</p>
+  </section>
+${pageDivs}
+  <div class="nav">
+    <button id="prevBtn" type="button">◀ Previous</button>
+    <span id="pageCounter"></span>
+    <button id="nextBtn" type="button">Next ▶</button>
+  </div>
+<script>
+(function () {
+  var pages = document.querySelectorAll('.page');
+  var idx = 0;
+  var counter = document.getElementById('pageCounter');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  function show(i) {
+    pages.forEach(function (p, j) { p.classList.toggle('active', j === i); });
+    idx = i;
+    counter.textContent = 'Page ' + (i + 1) + ' of ' + pages.length;
+    prevBtn.disabled = i === 0;
+    nextBtn.disabled = i === pages.length - 1;
+  }
+  prevBtn.addEventListener('click', function () { if (idx > 0) show(idx - 1); });
+  nextBtn.addEventListener('click', function () { if (idx < pages.length - 1) show(idx + 1); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' && idx > 0) show(idx - 1);
+    if (e.key === 'ArrowRight' && idx < pages.length - 1) show(idx + 1);
+  });
+  show(0);
+})();
+</script>
+</body>
+</html>
+`;
+}
+
+app.post('/api/generate-notebook', async (req, res) => {
+  const { jobId, images, destFolder } = req.body;
+
+  if (!jobId || !Array.isArray(images) || images.length === 0) {
+    return res.status(400).json({ error: 'jobId and at least one image are required' });
+  }
+  if (!destFolder || typeof destFolder !== 'string') {
+    return res.status(400).json({ error: 'destFolder is required' });
+  }
+  try {
+    fs.accessSync(destFolder, fs.constants.W_OK);
+  } catch {
+    return res.status(400).json({ error: 'Destination folder does not exist or is not writable: ' + destFolder });
+  }
+
+  const jobUploadDir = path.join(UPLOAD_DIR, jobId);
+  for (const img of images) {
+    if (!img.filename || !/^[a-f0-9]+(\.[a-zA-Z0-9]+)?$/.test(img.filename)) {
+      return res.status(400).json({ error: 'Invalid image filename' });
+    }
+    const full = path.join(jobUploadDir, img.filename);
+    if (!fs.existsSync(full)) {
+      return res.status(400).json({ error: 'Uploaded file missing: ' + img.filename });
+    }
+  }
+
+  const jobTmpDir = path.join(TMP_DIR, jobId);
+  fs.mkdirSync(jobTmpDir, { recursive: true });
+
+  try {
+    const dataUris = [];
+    for (let i = 0; i < images.length; i++) {
+      const inPath = path.join(jobUploadDir, images[i].filename);
+      const outPath = path.join(jobTmpDir, `nb_${i}.jpg`);
+      await runFfmpeg(buildNotebookImageArgs(inPath, outPath));
+      const b64 = fs.readFileSync(outPath).toString('base64');
+      dataUris.push(`data:image/jpeg;base64,${b64}`);
+    }
+
+    const pages = planNotebookPages(dataUris);
+    const html = buildNotebookHtml(pages);
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const finalOutputPath = path.join(destFolder, `notebook_${timestamp}.html`);
+    fs.writeFileSync(finalOutputPath, html, 'utf8');
+
+    res.json({ outputPath: finalOutputPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    try {
+      fs.rmSync(jobTmpDir, { recursive: true, force: true });
+      fs.rmSync(jobUploadDir, { recursive: true, force: true });
+    } catch { /* non-fatal */ }
+  }
+});
+
+// ---------------------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`MergeVideos app running at http://localhost:${PORT}`);
 });

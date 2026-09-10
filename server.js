@@ -63,6 +63,29 @@ const ALLOWED_IMAGE_EXT = new Set([
   '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp'
 ]);
 
+const IMAGE_DURATION = 3; // seconds per image, fixed (see spec)
+const CROSSFADE_DURATION = 0.8; // seconds, must be < IMAGE_DURATION
+const IMAGE_FPS = 30;
+
+// Builds an ffmpeg filter_complex chaining `xfade` across n pre-built,
+// equal-duration (IMAGE_DURATION) segment inputs [0:v]..[n-1:v] into a
+// single [vout] crossfaded stream. Every segment has the same fixed
+// duration, so each transition's offset is simply a multiple of
+// (IMAGE_DURATION - CROSSFADE_DURATION) — the point at which the next
+// segment starts overlapping the one before it. Only called for n > 1;
+// n === 1 has nothing to crossfade.
+function buildXfadeFilterComplex(n) {
+  const parts = [];
+  let prevLabel = '0:v';
+  for (let i = 1; i < n; i++) {
+    const outLabel = i === n - 1 ? 'vout' : `v${i}`;
+    const offset = i * (IMAGE_DURATION - CROSSFADE_DURATION);
+    parts.push(`[${prevLabel}][${i}:v]xfade=transition=fade:duration=${CROSSFADE_DURATION}:offset=${offset}[${outLabel}]`);
+    prevLabel = outLabel;
+  }
+  return parts.join(';');
+}
+
 function fileFilter(req, file, cb) {
   const ext = path.extname(file.originalname).toLowerCase();
   const looksLikeVideo = file.mimetype.startsWith('video/') || ALLOWED_VIDEO_EXT.has(ext);
@@ -429,6 +452,47 @@ app.get('/api/progress/:jobId', (req, res) => {
 });
 
 // ---------------------------------------------------------------------
+// Generate (image slideshow: Ken Burns + crossfade + compress)
+// ---------------------------------------------------------------------
+app.post('/api/generate-images', (req, res) => {
+  const { jobId, images, destFolder } = req.body;
+
+  if (!jobId || !Array.isArray(images) || images.length === 0) {
+    return res.status(400).json({ error: 'jobId and at least one image are required' });
+  }
+  if (!destFolder || typeof destFolder !== 'string') {
+    return res.status(400).json({ error: 'destFolder is required' });
+  }
+  try {
+    fs.accessSync(destFolder, fs.constants.W_OK);
+  } catch {
+    return res.status(400).json({ error: 'Destination folder does not exist or is not writable: ' + destFolder });
+  }
+
+  const jobUploadDir = path.join(UPLOAD_DIR, jobId);
+  for (const img of images) {
+    if (!img.filename || !/^[a-f0-9]+(\.[a-zA-Z0-9]+)?$/.test(img.filename)) {
+      return res.status(400).json({ error: 'Invalid image filename' });
+    }
+    const full = path.join(jobUploadDir, img.filename);
+    if (!fs.existsSync(full)) {
+      return res.status(400).json({ error: 'Uploaded file missing: ' + img.filename });
+    }
+  }
+
+  jobs.set(jobId, { percent: 0, status: 'queued', message: 'Queued', outputPath: null });
+  res.json({ jobId });
+
+  runImagePipeline(jobId, images, destFolder).catch((err) => {
+    jobs.set(jobId, { percent: 0, status: 'error', message: err.message, outputPath: null });
+    try {
+      fs.rmSync(path.join(TMP_DIR, jobId), { recursive: true, force: true });
+      fs.rmSync(jobUploadDir, { recursive: true, force: true });
+    } catch { /* non-fatal */ }
+  });
+});
+
+// ---------------------------------------------------------------------
 // YouTube upload
 // ---------------------------------------------------------------------
 app.get('/api/youtube/auth-status', (req, res) => {
@@ -603,6 +667,13 @@ function getDuration(filePath) {
   });
 }
 
+// Rounds up to the nearest even number — video codecs require even
+// width/height, so any canvas size derived from source dimensions must
+// be rounded this way before use as an encode target.
+function roundUpEven(n) {
+  return Math.ceil(n / 2) * 2;
+}
+
 function runFfmpeg(args, onProgress) {
   return new Promise((resolve, reject) => {
     const proc = spawn('ffmpeg', ['-y', ...args]);
@@ -641,7 +712,6 @@ async function runPipeline(jobId, clips, destFolder) {
   // every higher-res clip in the merge to be downscaled to match it.
   const probes = [];
   for (const p of inputPaths) probes.push(await ffprobe(p));
-  const roundUpEven = (n) => Math.ceil(n / 2) * 2;
   const target = {
     width: roundUpEven(Math.max(...probes.map((p) => p.width))),
     height: roundUpEven(Math.max(...probes.map((p) => p.height))),
@@ -865,6 +935,181 @@ async function runPipeline(jobId, clips, destFolder) {
     status: 'done',
     percent: 100,
     message: compressed ? 'Done' : 'Done (compression unavailable, saved uncompressed merge)',
+    outputPath: finalOutputPath,
+    youtubeSafePath,
+    originalSizeBytes,
+    compressedSizeBytes,
+    savedBytes,
+    savedPercent,
+    compressed
+  });
+}
+
+async function runImagePipeline(jobId, images, destFolder) {
+  const jobUploadDir = path.join(UPLOAD_DIR, jobId);
+  const jobTmpDir = path.join(TMP_DIR, jobId);
+  fs.mkdirSync(jobTmpDir, { recursive: true });
+
+  const setJob = (patch) => jobs.set(jobId, { ...jobs.get(jobId), ...patch });
+
+  setJob({ status: 'processing', message: 'Analyzing images...', percent: 1 });
+
+  const inputPaths = images.map((img) => path.join(jobUploadDir, img.filename));
+
+  // Target canvas = the largest width/height across all images, same
+  // reasoning as the video-merge pipeline: whichever image happens to be
+  // smallest shouldn't force every other image to be downscaled.
+  const probes = [];
+  for (const p of inputPaths) probes.push(await ffprobe(p));
+  const target = {
+    width: roundUpEven(Math.max(...probes.map((p) => p.width))),
+    height: roundUpEven(Math.max(...probes.map((p) => p.height)))
+  };
+
+  const n = inputPaths.length;
+  // Weighted progress across up to 3 passes: per-image segment encode,
+  // crossfade chain (skipped for a single image), final compress.
+  const normalizeWeight = n > 1 ? 0.45 : 0.55;
+  const concatWeight = n > 1 ? 0.1 : 0;
+  const compressWeight = 0.45;
+
+  const totalSegSeconds = n * IMAGE_DURATION;
+  let doneSeconds = 0;
+
+  const segmentPaths = [];
+  for (let i = 0; i < n; i++) {
+    const inPath = inputPaths[i];
+    const outPath = path.join(jobTmpDir, `seg_${i}.mp4`);
+    segmentPaths.push(outPath);
+
+    setJob({ message: `Processing image ${i + 1} of ${n}...` });
+
+    // scale+crop fills the whole target canvas with no letterboxing (a
+    // still image, unlike mismatched video clips, has no reason to show
+    // black bars), then zoompan drives a slow Ken Burns zoom-in across
+    // the image's full on-screen duration (d = IMAGE_DURATION * IMAGE_FPS
+    // frames). -an: images carry no audio.
+    //
+    // IMPORTANT: no -loop/-t as INPUT options here. zoompan emits `d`
+    // output frames for EVERY input frame it receives. Looping the image
+    // with -loop 1 -t 3 feeds it 75 input frames (image2 demuxer's
+    // default 25fps over 3s), which multiplies out to 75*90=6750 output
+    // frames (~225s) instead of 90 (3s) — a 75x blowup. Feeding a single,
+    // non-looped frame (`-i inPath` alone) means zoompan sees exactly 1
+    // input frame, so d alone determines the output frame count/duration.
+    const vf = [
+      `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
+      `crop=${target.width}:${target.height}`,
+      `zoompan=z='min(zoom+0.0015,1.12)':d=${IMAGE_DURATION * IMAGE_FPS}:s=${target.width}x${target.height}:fps=${IMAGE_FPS}`,
+      'format=yuv420p'
+    ].join(',');
+
+    const args = [
+      '-i', inPath,
+      '-vf', vf,
+      '-r', String(IMAGE_FPS),
+      '-an',
+      '-c:v', 'libx264',
+      '-preset', 'slow',
+      '-crf', '20',
+      '-movflags', '+faststart',
+      outPath
+    ];
+
+    const segStartSeconds = doneSeconds;
+    await runFfmpeg(args, (seconds) => {
+      const segProgress = Math.min(seconds, IMAGE_DURATION);
+      const overall = ((segStartSeconds + segProgress) / totalSegSeconds) * normalizeWeight;
+      setJob({ percent: Math.round(overall * 100) });
+    });
+    doneSeconds += IMAGE_DURATION;
+  }
+
+  const concatOutputPath = path.join(jobTmpDir, 'concat_output.mp4');
+  // Every crossfade overlaps the next segment by CROSSFADE_DURATION, so
+  // the final duration is less than the sum of segment durations.
+  const finalSegDuration = n * IMAGE_DURATION - Math.max(0, n - 1) * CROSSFADE_DURATION;
+
+  if (n === 1) {
+    // Nothing to crossfade with a single image.
+    fs.copyFileSync(segmentPaths[0], concatOutputPath);
+    setJob({ percent: Math.round((normalizeWeight + concatWeight) * 100) });
+  } else {
+    setJob({ message: 'Blending crossfades...', percent: Math.round(normalizeWeight * 100) });
+
+    const inputArgs = segmentPaths.flatMap((p) => ['-i', p]);
+    const filterComplex = buildXfadeFilterComplex(n);
+
+    // xfade is a real filter, not a concat-demuxer stream copy, so this
+    // pass re-encodes once (unlike the video-merge pipeline's -c copy
+    // concat, which can skip re-encoding because every segment there is
+    // already byte-identical in format).
+    await runFfmpeg([
+      ...inputArgs,
+      '-filter_complex', filterComplex,
+      '-map', '[vout]',
+      '-c:v', 'libx264',
+      '-preset', 'slow',
+      '-crf', '20',
+      '-movflags', '+faststart',
+      concatOutputPath
+    ], (seconds) => {
+      const overall = normalizeWeight + Math.min(seconds / finalSegDuration, 1) * concatWeight;
+      setJob({ percent: Math.round(overall * 100) });
+    });
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const outputFilename = `slideshow_output_${timestamp}.mp4`;
+  const finalOutputPath = path.join(destFolder, outputFilename);
+  const originalSizeBytes = fs.statSync(concatOutputPath).size;
+
+  setJob({ message: 'Compressing final video...', percent: Math.round((normalizeWeight + concatWeight) * 100) });
+
+  // Same compression approach as the video-merge pipeline: H.265/CRF 23
+  // for roughly half the bitrate at visually-unchanged quality, falling
+  // back to a plain copy if this ffmpeg build has no libx265.
+  let compressed = false;
+  try {
+    await runFfmpeg([
+      '-i', concatOutputPath,
+      '-map', '0:v:0',
+      '-c:v', 'libx265',
+      '-preset', 'medium',
+      '-crf', '23',
+      '-tag:v', 'hvc1',
+      '-movflags', '+faststart',
+      finalOutputPath
+    ], (seconds) => {
+      const overall = normalizeWeight + concatWeight + Math.min(seconds / finalSegDuration, 1) * compressWeight;
+      setJob({ percent: Math.round(overall * 100) });
+    });
+    compressed = true;
+  } catch (err) {
+    fs.copyFileSync(concatOutputPath, finalOutputPath);
+  }
+
+  const compressedSizeBytes = fs.statSync(finalOutputPath).size;
+  const savedBytes = Math.max(0, originalSizeBytes - compressedSizeBytes);
+  const savedPercent = originalSizeBytes > 0 ? Math.round((savedBytes / originalSizeBytes) * 1000) / 10 : 0;
+
+  // Same H.264 "youtube-safe" copy as the video-merge pipeline, and for
+  // the same reason: YouTube's ingest pipeline is unreliable with HEVC.
+  let youtubeSafePath = finalOutputPath;
+  if (compressed) {
+    youtubeSafePath = path.join(destFolder, `slideshow_output_${timestamp}_youtube-safe.mp4`);
+    fs.copyFileSync(concatOutputPath, youtubeSafePath);
+  }
+
+  try {
+    fs.rmSync(jobTmpDir, { recursive: true, force: true });
+    fs.rmSync(jobUploadDir, { recursive: true, force: true });
+  } catch { /* non-fatal */ }
+
+  setJob({
+    status: 'done',
+    percent: 100,
+    message: compressed ? 'Done' : 'Done (compression unavailable, saved uncompressed slideshow)',
     outputPath: finalOutputPath,
     youtubeSafePath,
     originalSizeBytes,

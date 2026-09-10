@@ -820,6 +820,14 @@ async function runImagePipeline(jobId, images, destFolder) {
     // black bars), then zoompan drives a slow Ken Burns zoom-in across
     // the image's full on-screen duration (d = IMAGE_DURATION * IMAGE_FPS
     // frames). -an: images carry no audio.
+    //
+    // IMPORTANT: no -loop/-t as INPUT options here. zoompan emits `d`
+    // output frames for EVERY input frame it receives. Looping the image
+    // with -loop 1 -t 3 feeds it 75 input frames (image2 demuxer's
+    // default 25fps over 3s), which multiplies out to 75*90=6750 output
+    // frames (~225s) instead of 90 (3s) — a 75x blowup. Feeding a single,
+    // non-looped frame (`-i inPath` alone) means zoompan sees exactly 1
+    // input frame, so d alone determines the output frame count/duration.
     const vf = [
       `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
       `crop=${target.width}:${target.height}`,
@@ -828,8 +836,6 @@ async function runImagePipeline(jobId, images, destFolder) {
     ].join(',');
 
     const args = [
-      '-loop', '1',
-      '-t', String(IMAGE_DURATION),
       '-i', inPath,
       '-vf', vf,
       '-r', String(IMAGE_FPS),

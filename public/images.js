@@ -3,6 +3,9 @@
   const browseImagesBtn = document.getElementById('browseImagesBtn');
   const browseBtn = document.getElementById('browseBtn');
   const destFolderInput = document.getElementById('destFolder');
+  const musicPathInput = document.getElementById('musicPath');
+  const musicBrowseBtn = document.getElementById('musicBrowseBtn');
+  const musicClearBtn = document.getElementById('musicClearBtn');
   const generateBtn = document.getElementById('generateBtn');
   const alertArea = document.getElementById('alertArea');
   const progressWrap = document.getElementById('progressWrap');
@@ -183,6 +186,29 @@
     }
   });
 
+  musicBrowseBtn.addEventListener('click', async () => {
+    clearAlert();
+    musicBrowseBtn.disabled = true;
+    musicBrowseBtn.textContent = 'Waiting for dialog...';
+    try {
+      const res = await fetch('/api/browse-audio');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not open file browser');
+      if (data.path) {
+        musicPathInput.value = data.path;
+      }
+    } catch (err) {
+      showAlert('Music browse failed: ' + err.message);
+    } finally {
+      musicBrowseBtn.disabled = false;
+      musicBrowseBtn.textContent = 'Browse...';
+    }
+  });
+
+  musicClearBtn.addEventListener('click', () => {
+    musicPathInput.value = '';
+  });
+
   function formatBytes(bytes) {
     if (!bytes && bytes !== 0) return '';
     const units = ['B', 'KB', 'MB', 'GB'];
@@ -264,7 +290,8 @@
         body: JSON.stringify({
           jobId,
           images: imagesPayload,
-          destFolder: destFolderInput.value.trim()
+          destFolder: destFolderInput.value.trim(),
+          musicPath: musicPathInput.value.trim() || undefined
         })
       });
       const data = await res.json();

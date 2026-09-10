@@ -63,6 +63,10 @@ const ALLOWED_IMAGE_EXT = new Set([
   '.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp'
 ]);
 
+const ALLOWED_AUDIO_EXT = new Set([
+  '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.wma'
+]);
+
 const IMAGE_DURATION = 3; // seconds per image, fixed (see spec)
 const CROSSFADE_DURATION = 0.8; // seconds, must be < IMAGE_DURATION
 const IMAGE_FPS = 30;
@@ -109,6 +113,30 @@ function buildMusicArgs(durationSeconds, outPath) {
     '-filter_complex',
     `[0:a][1:a][2:a]amix=inputs=3:duration=longest,tremolo=f=0.15:d=0.4,volume=0.35,` +
       `afade=t=in:d=${fadeDur},afade=t=out:st=${fadeOutStart}:d=${fadeDur}`,
+    '-ar', '44100',
+    '-ac', '2',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    outPath
+  ];
+}
+
+// Prepares a user-supplied music file for the slideshow: loops it
+// (-stream_loop -1 on the input, -t on the output — standard ffmpeg
+// "loop to fill a target duration" pattern) so a track shorter than the
+// video repeats seamlessly instead of leaving the tail silent, trims to
+// the video's exact duration, and applies the same fade in/out as the
+// generated pad so the track doesn't cut off abruptly. Unlike the
+// generated pad, no volume attenuation — the user's track is the
+// intended soundtrack here, not a subtle backdrop under something else.
+function buildUserMusicArgs(sourcePath, durationSeconds, outPath) {
+  const fadeDur = Math.min(2, durationSeconds / 4);
+  const fadeOutStart = Math.max(0, durationSeconds - fadeDur);
+  return [
+    '-stream_loop', '-1',
+    '-i', sourcePath,
+    '-t', String(durationSeconds),
+    '-af', `afade=t=in:d=${fadeDur},afade=t=out:st=${fadeOutStart}:d=${fadeDur}`,
     '-ar', '44100',
     '-ac', '2',
     '-c:a', 'aac',
@@ -427,6 +455,40 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 });
 
 // ---------------------------------------------------------------------
+// Native Windows file browse dialog (single audio file, for optional
+// background music on the image-slideshow page)
+// ---------------------------------------------------------------------
+app.get('/api/browse-audio', (req, res) => {
+  const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.StartPosition = 'CenterScreen'
+$owner.WindowState = 'Minimized'
+$owner.ShowInTaskbar = $false
+$owner.Show()
+$owner.Activate()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = 'Select a background music file'
+$dialog.Filter = 'Audio files|*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg;*.wma|All files|*.*'
+$dialog.Multiselect = $false
+$result = $dialog.ShowDialog($owner)
+$owner.Close()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.FileName
+}
+`.trim();
+
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', psScript], { timeout: 120000 }, (err, stdout) => {
+    if (err) {
+      return res.status(500).json({ error: 'Could not open file dialog: ' + err.message });
+    }
+    const selected = stdout.trim();
+    res.json({ path: selected || null });
+  });
+});
+
+// ---------------------------------------------------------------------
 // Generate (merge + label + compress)
 // ---------------------------------------------------------------------
 app.post('/api/generate', (req, res) => {
@@ -486,7 +548,7 @@ app.get('/api/progress/:jobId', (req, res) => {
 // Generate (image slideshow: Ken Burns + crossfade + compress)
 // ---------------------------------------------------------------------
 app.post('/api/generate-images', (req, res) => {
-  const { jobId, images, destFolder } = req.body;
+  const { jobId, images, destFolder, musicPath } = req.body;
 
   if (!jobId || !Array.isArray(images) || images.length === 0) {
     return res.status(400).json({ error: 'jobId and at least one image are required' });
@@ -498,6 +560,28 @@ app.post('/api/generate-images', (req, res) => {
     fs.accessSync(destFolder, fs.constants.W_OK);
   } catch {
     return res.status(400).json({ error: 'Destination folder does not exist or is not writable: ' + destFolder });
+  }
+
+  // musicPath is optional — when omitted, the pipeline falls back to a
+  // generated ambient pad. When provided it's a raw local path (like
+  // destFolder), not something already copied into the job's upload dir.
+  if (musicPath !== undefined && musicPath !== null && musicPath !== '') {
+    if (typeof musicPath !== 'string') {
+      return res.status(400).json({ error: 'musicPath must be a string' });
+    }
+    const ext = path.extname(musicPath).toLowerCase();
+    if (!ALLOWED_AUDIO_EXT.has(ext)) {
+      return res.status(400).json({ error: 'Unsupported audio file type: ' + musicPath });
+    }
+    let stat;
+    try {
+      stat = fs.statSync(musicPath);
+    } catch {
+      return res.status(400).json({ error: 'Music file not found: ' + musicPath });
+    }
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Not a file: ' + musicPath });
+    }
   }
 
   const jobUploadDir = path.join(UPLOAD_DIR, jobId);
@@ -514,7 +598,7 @@ app.post('/api/generate-images', (req, res) => {
   jobs.set(jobId, { percent: 0, status: 'queued', message: 'Queued', outputPath: null });
   res.json({ jobId });
 
-  runImagePipeline(jobId, images, destFolder).catch((err) => {
+  runImagePipeline(jobId, images, destFolder, musicPath || null).catch((err) => {
     jobs.set(jobId, { percent: 0, status: 'error', message: err.message, outputPath: null });
     try {
       fs.rmSync(path.join(TMP_DIR, jobId), { recursive: true, force: true });
@@ -976,7 +1060,7 @@ async function runPipeline(jobId, clips, destFolder) {
   });
 }
 
-async function runImagePipeline(jobId, images, destFolder) {
+async function runImagePipeline(jobId, images, destFolder, musicSourcePath) {
   const jobUploadDir = path.join(UPLOAD_DIR, jobId);
   const jobTmpDir = path.join(TMP_DIR, jobId);
   fs.mkdirSync(jobTmpDir, { recursive: true });
@@ -1123,14 +1207,22 @@ async function runImagePipeline(jobId, images, destFolder) {
   const finalOutputPath = path.join(destFolder, outputFilename);
   const originalSizeBytes = fs.statSync(concatOutputPath).size;
 
-  // Generated background music (no external file / licensing concern —
-  // see buildMusicArgs), matched exactly to the video's final duration.
+  // Background music, matched exactly to the video's final duration.
   // concat_output.mp4 has no audio track at all (images carry none, -an
   // throughout the segment/xfade passes), so every downstream copy of it
   // below needs this muxed in via ffmpeg rather than a plain file copy.
+  // A user-supplied track (musicSourcePath) is looped/trimmed to fit and
+  // played at full volume — it's the intended soundtrack. With no track
+  // supplied, fall back to the generated ambient pad (no external file or
+  // licensing concern, since it's synthesized rather than a real
+  // recording), attenuated since it's meant as a subtle backdrop.
   setJob({ message: 'Composing background music...', percent: Math.round((normalizeWeight + concatWeight) * 100) });
-  const musicPath = path.join(jobTmpDir, 'music.m4a');
-  await runFfmpeg(buildMusicArgs(finalSegDuration, musicPath));
+  const musicOutPath = path.join(jobTmpDir, 'music.m4a');
+  await runFfmpeg(
+    musicSourcePath
+      ? buildUserMusicArgs(musicSourcePath, finalSegDuration, musicOutPath)
+      : buildMusicArgs(finalSegDuration, musicOutPath)
+  );
 
   setJob({ message: 'Compressing final video...' });
 
@@ -1143,7 +1235,7 @@ async function runImagePipeline(jobId, images, destFolder) {
   try {
     await runFfmpeg([
       '-i', concatOutputPath,
-      '-i', musicPath,
+      '-i', musicOutPath,
       '-map', '0:v:0',
       '-map', '1:a:0',
       '-c:v', 'libx265',
@@ -1163,7 +1255,7 @@ async function runImagePipeline(jobId, images, destFolder) {
   } catch (err) {
     await runFfmpeg([
       '-i', concatOutputPath,
-      '-i', musicPath,
+      '-i', musicOutPath,
       '-map', '0:v:0',
       '-map', '1:a:0',
       '-c:v', 'copy',
@@ -1188,7 +1280,7 @@ async function runImagePipeline(jobId, images, destFolder) {
     youtubeSafePath = path.join(destFolder, `slideshow_output_${timestamp}_youtube-safe.mp4`);
     await runFfmpeg([
       '-i', concatOutputPath,
-      '-i', musicPath,
+      '-i', musicOutPath,
       '-map', '0:v:0',
       '-map', '1:a:0',
       '-c:v', 'copy',
